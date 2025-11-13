@@ -136,6 +136,38 @@ This method emits a `SellEvent` event containing:
 - `buyer_total_accrued_dividends`: the pending accrued dividends from all the sell operations from this account (zero if `<RECEIVE_DIVIDENDS>` is `true`).  
 - `buyer_accrued_jackpot`: past jackpots amount accrued to the seller.  
 
+# Airdrop
+```
+CALL_METHOD
+    Address("<ACCOUNT_ADDRESS>")
+    "withdraw"
+    Address("<XRD_ADDRESS>")
+    Decimal("<XRD_AMOUNT>")
+;
+TAKE_ALL_FROM_WORKTOP
+    Address("<XRD_ADDRESS>")
+    Bucket("xrd")
+;
+CALL_METHOD
+    Address("<COMPONENT>")
+    "airdrop"
+    Bucket("xrd")
+    Map<Address, Decimal>(
+        Address("<RECIPIENT_ADDRESS>") => Decimal("<SHARE>"),
+        ...
+    )
+;
+```
+
+`<ACCOUNT_ADDRESS>` user's account address.  
+`<XRD_ADDRESS>` XRD resource address.  
+`<XRD_AMOUNT>` the amount of XRD used to buy `Jimmi`.  
+`<COMPONENT>` Jimmi component address.  
+`<RECIPIENT_ADDRESS>`: account address of one of the recipients.  
+`<SHARE>`: share of jimmi coins to send to this recipient. The sum of all shares must be 1.  
+
+This method emits a `BuyEvent` event (see buy operation) for each recipient.  
+
 # Withdraw dividends
 ```
 CALL_METHOD
@@ -157,5 +189,4 @@ This method emits a `WithdrawDividendsEvent` event containing:
 - `account`: the address of the account withdrawing his dividends.  
 - `withdrawn_dividends`: the amount of dividends withdrawn in this operation.  
 - `withdrawn_jackpot`: amount of withdrawn jackpot.  
-
 
