@@ -10,8 +10,8 @@ struct DepositBadge {
     bought_amount: Decimal,
     // Price the Jimmi were bought at
     price: Decimal,
-    // Dividends amount per Jimmi coin
-    global_dividends_per_jimmi: Decimal,
+    // Amount of dividends paid in the current buy operation
+    dividends_amount: Decimal,
 }
 
 /* NonFungibleData of the badge needed to withdraw Jimmi from a Vault.
@@ -39,6 +39,7 @@ struct Buyer {
 // Information about a past jackpot; an item of the jackpots KVS
 #[derive(ScryptoSbor)]
 struct Jackpot {
+    // XRD prize per jimmi coin
     prize_per_jimmi: Decimal,
 }
 
@@ -51,16 +52,14 @@ struct BuyEvent {
     price: Decimal,
     // Amount of Jimmi bought
     bought_amount: Decimal,
-    // Amount of dividends not yet accrued to any user
-    total_dividends_amount: Decimal,
     // Current amount of the next jackpot
     current_jackpot_amount: Decimal,
-    // Current amount of unaccrued dividends per Jimmi
+    // Dividends accrued per Jimmi so far
     global_dividends_per_jimmi: Decimal,
-    // Weighted average dividends per Jimmi at buy time for the buyer
-    buyer_dividends_per_jimmi: Decimal,
     // Jimmi ATH since the last jackpot distribution
     ath: Decimal,
+    // Amount of dividends accued to the buyer
+    buyer_total_accrued_dividends: Decimal,
     // Past jackpots amount accrued to the buyer
     buyer_accrued_jackpot: Decimal,
 }
@@ -74,16 +73,14 @@ struct SellEvent {
     price: Decimal,
     // Amount of Jimmi sold
     sold_amount: Decimal,
-    // Amount of dividends not yet accrued to any user
-    total_dividends_amount: Decimal,
     // Current amount of the next jackpot
     current_jackpot_amount: Decimal,
-    // Current amount of unaccrued dividends per Jimmi
+    // Dividends accrued per Jimmi so far
     global_dividends_per_jimmi: Decimal,
     // Amount of dividends accued to the seller
-    buyer_total_accrued_dividends: Decimal,
+    seller_total_accrued_dividends: Decimal,
     // Past jackpots amount accrued to the seller
-    buyer_accrued_jackpot: Decimal,
+    seller_accrued_jackpot: Decimal,
 }
 
 // This event is emitted when a user withdraws his dividends and jackpot share
@@ -106,6 +103,12 @@ struct JackpotDistributedEvent {
     prize_per_jimmi: Decimal,
 }
 
+#[derive(ScryptoSbor, ScryptoEvent)]
+struct AirdropCompletedEvent {
+    // Dividends accrued per Jimmi so far
+    global_dividends_per_jimmi: Decimal,
+}
+
 #[blueprint]
 #[types(
     DepositBadge,
@@ -120,6 +123,7 @@ struct JackpotDistributedEvent {
     SellEvent,
     WithdrawDividendsEvent,
     JackpotDistributedEvent,
+    AirdropCompletedEvent,
 )]
 mod jimmi {
     struct Jimmi {
@@ -154,8 +158,8 @@ mod jimmi {
         // Last transaction a deposit or withdraw badge was issued. Use this to avoid issuing both
         // deposit and withdraw badges in the same transaction
         transaction_hash: Hash,
-        // Current amount of dividends not yet accrued to a seller
-        unassigned_dividends: Decimal,
+        // Current dividends amount per Jimmi coin
+        dividends_per_jimmi: Decimal,
         // Jimmi ATH since the last jackpot distribution
         ath: Decimal,
         // A jackpot distribution can happen when the price is below this percentage of the ATH
@@ -356,7 +360,7 @@ mod jimmi {
                 next_badge_id: 1,
                 buyers: KeyValueStore::new_with_registered_type(),
                 transaction_hash: Runtime::transaction_hash(),
-                unassigned_dividends: Decimal::ZERO,
+                dividends_per_jimmi: Decimal::ZERO,
                 ath: Decimal::ZERO,
                 jackpot_threshold: jackpot_threshold,
                 jackpot_threshold_time: jackpot_threshold_time,
@@ -518,6 +522,19 @@ mod jimmi {
             }       
         }
 
+        fn accrew_dividends(
+            &self,
+            // The buyer whose dividends must me accrued
+            buyer: &mut Buyer,
+        )  {
+            // Accrew the accumulated dividends since the token bought
+            buyer.accrued_dividends += buyer.current_bought_amount *
+                (self.dividends_per_jimmi - buyer.dividends_per_jimmi);
+
+            // No more dividends to accrew
+            buyer.dividends_per_jimmi = self.dividends_per_jimmi;
+        }
+
         /* This method exchanges a bucket of XRD for a bucket of Jimmi coins.
          * A deposit badge is provided so that the user can deposit the Jimmi coins in his account.
          * The deposit badge must be returned to the post_buy method; it contains information
@@ -544,20 +561,11 @@ mod jimmi {
                 "No XRD provided"
             );
 
-            let supply = self.jimmi_manager.total_supply().unwrap();
-
-            // Compute the current global dividends amount per Jimmi coin
-            let global_dividends_per_jimmi = match supply == Decimal::ZERO {
-                true => Decimal::ZERO,
-                false =>  self.unassigned_dividends / supply,
-            };
-
             // Take the XRD share to use as dividends
             let dividends_amount = xrd_amount * self.dividends_percentage;
             self.dividends.put(
                 xrd_bucket.take(dividends_amount)
             );
-            self.unassigned_dividends += dividends_amount;
 
             // Take the XRD share to add to the jackpot
             let jackpot_amount = xrd_amount * self.jackpot_percentage;
@@ -599,7 +607,7 @@ mod jimmi {
                 DepositBadge {
                     bought_amount: bought_amount,
                     price: price,
-                    global_dividends_per_jimmi: global_dividends_per_jimmi,
+                    dividends_amount: dividends_amount,
                 }
             );
 
@@ -632,38 +640,32 @@ mod jimmi {
             // NonFungibleData
             let deposit_badge = deposit_badge_bucket.non_fungible::<DepositBadge>().data();
 
-            // Compute the new global dividends amount per Jimmi coin
-            let global_dividends_per_jimmi =
-                self.unassigned_dividends / self.jimmi_manager.total_supply().unwrap();
-
             // Is the buyer already registered?
             let mut buyer = match self.buyers.get(&account) {
                 // If not create a new one
                 None => Buyer {
                     current_bought_amount: Decimal::ZERO,
-                    dividends_per_jimmi: deposit_badge.global_dividends_per_jimmi,
+                    dividends_per_jimmi: self.dividends_per_jimmi,
                     accrued_dividends: Decimal::ZERO,
                     current_jackpot_number: self.current_jackpot_number,
                     accrued_jackpot: Decimal::ZERO,
                 },
-                Some(b) => {
-                    let mut buyer = b.clone();
-
-                    // Update the dividends_per_jimmi for this buyer
-                    buyer.dividends_per_jimmi =
-                        (buyer.current_bought_amount * buyer.dividends_per_jimmi +
-                        deposit_badge.bought_amount * deposit_badge.global_dividends_per_jimmi) /
-                        (buyer.current_bought_amount + deposit_badge.bought_amount);
-
-                    buyer
-                },
+                Some(buyer) => buyer.clone(),
             };
 
-            // Accrew eventual past jackpots to the buyer
+            // Accrew past dividends and jackpots to the buyer
+            self.accrew_dividends(&mut buyer);
             _ = self.check_won_jackpots(&mut buyer, false);
             
+            // Compute the new global dividends amount per Jimmi coin
+            self.dividends_per_jimmi +=
+                deposit_badge.dividends_amount / self.jimmi_manager.total_supply().unwrap();
+
             // Update the bought amount for this buyer
             buyer.current_bought_amount += deposit_badge.bought_amount;
+
+            // Accrew his own share of the dividends he paid to the buyer
+            self.accrew_dividends(&mut buyer);
 
             // Check that the bought Jimmi have really been deposited in the specified account
             let jimmi_address = self.jimmi_manager.address();
@@ -678,11 +680,10 @@ mod jimmi {
                     account: account,
                     price: deposit_badge.price,
                     bought_amount: deposit_badge.bought_amount,
-                    total_dividends_amount: self.unassigned_dividends,
                     current_jackpot_amount: self.current_jackpot_amount,
-                    global_dividends_per_jimmi: global_dividends_per_jimmi,
-                    buyer_dividends_per_jimmi: buyer.dividends_per_jimmi,
+                    global_dividends_per_jimmi: self.dividends_per_jimmi,
                     ath: self.ath,
+                    buyer_total_accrued_dividends: buyer.accrued_dividends,
                     buyer_accrued_jackpot: buyer.accrued_jackpot,
                 }
             );
@@ -752,12 +753,13 @@ mod jimmi {
                 "Exactly one withdraw badge required"
             );
 
-            let (constant_product, xrd_in_pool, mut current_supply) = self.constant_product();
+            let (constant_product, xrd_in_pool, _) = self.constant_product();
 
             // Get existing information about the seller
             let mut buyer = self.buyers.get(&account).unwrap().clone();
             
-            // Accrew him any pending past jackpot
+            // Accrew him any past dividends and jackpot
+            self.accrew_dividends(&mut buyer);
             _ = self.check_won_jackpots(&mut buyer, false);
            
             // Check that the Jimmi coins really came from the specified account
@@ -770,17 +772,9 @@ mod jimmi {
             // Update the account owned coins amount
             buyer.current_bought_amount -= withdrawn_jimmi;
            
-            // Compute the dividends per jimmi before the sale
-            let mut global_dividends_per_jimmi = self.unassigned_dividends / current_supply;
-
-            // Accrew the accumulated dividends since the token bought
-            let accrued_dividends = global_dividends_per_jimmi * withdrawn_jimmi;
-            self.unassigned_dividends -= accrued_dividends;
-            buyer.accrued_dividends += accrued_dividends;
-
             // Burn the sold Jimmi and get the new supply
             jimmi_bucket.burn();
-            current_supply = self.jimmi_manager.total_supply().unwrap();
+            let current_supply = self.jimmi_manager.total_supply().unwrap();
             
             // Burn the withdraw badge and be ready to mint the next one
             withdraw_badge_bucket.burn();
@@ -797,7 +791,6 @@ mod jimmi {
             self.dividends.put(
                 xrd_bucket.take(dividends_amount)
             );
-            self.unassigned_dividends += dividends_amount;
 
             // Take the jackpot percentage out of the XRDs
             let jackpot_amount = xrd_amount * self.jackpot_percentage;
@@ -807,15 +800,20 @@ mod jimmi {
             self.current_jackpot_amount += jackpot_amount;
 
             // Compute the updated dividends per Jimmi coin
-            global_dividends_per_jimmi = match current_supply > Decimal::ZERO {
-                true => self.unassigned_dividends / current_supply,
-                false => Decimal::ZERO,
-            };
+            if current_supply > Decimal::ZERO {
+                self.dividends_per_jimmi += dividends_amount / current_supply;
+            }
 
             // Compute the sale price and check if a jackpot has been triggered
             let price = xrd_amount / jimmi_amount;
             if price < self.ath * self.jackpot_threshold {
                 self.check_jackpot_trigger(price);
+            }
+
+            // Accrew his own share of the dividends he paid to the seller if he still owns some
+            // Jimmi
+            if buyer.current_bought_amount > Decimal::ZERO {
+                self.accrew_dividends(&mut buyer);
             }
 
             // Emit the SellEvent event
@@ -824,11 +822,10 @@ mod jimmi {
                     account: account,
                     price: price,
                     sold_amount: jimmi_amount,
-                    total_dividends_amount: self.unassigned_dividends,
                     current_jackpot_amount: self.current_jackpot_amount,
-                    global_dividends_per_jimmi: global_dividends_per_jimmi,
-                    buyer_total_accrued_dividends: buyer.accrued_dividends,
-                    buyer_accrued_jackpot: buyer.accrued_jackpot,
+                    global_dividends_per_jimmi: self.dividends_per_jimmi,
+                    seller_total_accrued_dividends: buyer.accrued_dividends,
+                    seller_accrued_jackpot: buyer.accrued_jackpot,
                 }
             );
 
@@ -858,7 +855,10 @@ mod jimmi {
             // Get information about this account
             let mut buyer = self.buyers.get(&account).expect("Account not found").clone();
 
-            // Take the pending dividedns
+            // Accrew pending dividends to the user
+            self.accrew_dividends(&mut buyer);
+
+            // Take the pending dividends
             let dividends_bucket = self.dividends.take(buyer.accrued_dividends);
 
             // Get any new or previously accrued jackpot shares
@@ -905,16 +905,11 @@ mod jimmi {
                 "No XRD provided"
             );
 
-            // Compute the current global dividends amount per Jimmi coin
-            let global_dividends_per_jimmi =
-                self.unassigned_dividends / self.jimmi_manager.total_supply().unwrap();
-
             // Take the XRD share to use as dividends
             let dividends_amount = xrd_amount * self.dividends_percentage;
             self.dividends.put(
                 xrd_bucket.take(dividends_amount)
             );
-            self.unassigned_dividends += dividends_amount;
 
             // Take the XRD share to add to the jackpot
             let jackpot_amount = xrd_amount * self.jackpot_percentage;
@@ -956,13 +951,9 @@ mod jimmi {
                 DepositBadge {
                     bought_amount: bought_amount,
                     price: price,
-                    global_dividends_per_jimmi: global_dividends_per_jimmi,
+                    dividends_amount: dividends_amount,
                 }
             );
-
-            // Compute the new global dividends amount per Jimmi coin
-            let new_global_dividends_per_jimmi =
-                self.unassigned_dividends / self.jimmi_manager.total_supply().unwrap();
 
             for (account, share) in recipients.iter() {
                 // Compute the amount of Jimmi for this recipient
@@ -976,7 +967,7 @@ mod jimmi {
                     // If not create a new one
                     None => Buyer {
                         current_bought_amount: Decimal::ZERO,
-                        dividends_per_jimmi: Decimal::ZERO,
+                        dividends_per_jimmi: self.dividends_per_jimmi,
                         accrued_dividends: Decimal::ZERO,
                         current_jackpot_number: self.current_jackpot_number,
                         accrued_jackpot: Decimal::ZERO,
@@ -984,7 +975,8 @@ mod jimmi {
                     Some(buyer) => buyer.clone(),
                 };
 
-                // Accrew eventual past jackpots to the buyer
+                // Accrew eventual past dividends and jackpots to the buyer
+                self.accrew_dividends(&mut buyer);
                 _ = self.check_won_jackpots(&mut buyer, false);
 
                 // Try sending the Jiimi to the recipient
@@ -1002,12 +994,6 @@ mod jimmi {
                     refund.unwrap().burn();
 
                 } else {
-                    // Update the dividends_per_jimmi for this recipient
-                    buyer.dividends_per_jimmi =
-                        (buyer.current_bought_amount * buyer.dividends_per_jimmi +
-                        amount * global_dividends_per_jimmi) /
-                        (buyer.current_bought_amount + amount);
-
                     // Update the bought amount for this user
                     buyer.current_bought_amount += amount;
 
@@ -1017,12 +1003,11 @@ mod jimmi {
                             account: *account,
                             price: price,
                             bought_amount: amount,
-                            total_dividends_amount: self.unassigned_dividends,
                             current_jackpot_amount: self.current_jackpot_amount,
-                            global_dividends_per_jimmi: new_global_dividends_per_jimmi,
-                            buyer_dividends_per_jimmi: buyer.dividends_per_jimmi,
+                            global_dividends_per_jimmi: self.dividends_per_jimmi,
                             ath: self.ath,
                             buyer_accrued_jackpot: buyer.accrued_jackpot,
+                            buyer_total_accrued_dividends: buyer.accrued_dividends,
                         }
                     );
                 }
@@ -1034,11 +1019,22 @@ mod jimmi {
                 );
             }
 
-            jimmi_bucket.burn();
+            // Burn the deposit badge and get ready for minting a new one
             deposit_badge_bucket.burn();
             self.next_badge_id += 1;
-        }
 
+            // Burn the eventual excess Jimmi coins and compute the additional dividends amount per
+            // Jimmi coin
+            jimmi_bucket.burn();
+            self.dividends_per_jimmi +=
+                dividends_amount / self.jimmi_manager.total_supply().unwrap();
+
+            // Emit the AirdropCompletedEvent event with the new dividends_per_jimmi value
+            Runtime::emit_event(
+                AirdropCompletedEvent {
+                    global_dividends_per_jimmi: self.dividends_per_jimmi,
+                }
+            );
+        }
     }
 }
-

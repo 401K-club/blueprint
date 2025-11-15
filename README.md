@@ -66,11 +66,10 @@ This method emits a `BuyEvent` event containing:
 - `account`: the address of the buyer account.  
 - `price`: bought price (dividends and jackpot excluded).  
 - `bought_amount`: the number of bought Jimmi.  
-- `total_dividends_amount`: total amount of not assigned dividends in the component.  
 - `current_jackpot_amount`: current amount of the jackpot.  
 - `global_dividends_per_jimmi`: amount of dividends per Jimmi.  
-- `buyer_dividends_per_jimmi`: weighted average of `global_dividends_per_jimmi` during buy operations from this user.  
 - `ath`: Jimmi ATH since the last jackpot distribution.  
+- `buyer_total_accrued_dividends`: Dividends accrued to the buyer so far.  
 - `buyer_accrued_jackpot`: Past jackpots amount accrued to the buyer.  
 
 ## Sell
@@ -133,8 +132,8 @@ This method emits a `SellEvent` event containing:
 - `total_dividends_amount`: total amount of not assigned dividends in the component.  
 - `current_jackpot_amount`: current amount of the jackpot.  
 - `global_dividends_per_jimmi`: amount of dividends per Jimmi.  
-- `buyer_total_accrued_dividends`: the pending accrued dividends from all the sell operations from this account (zero if `<RECEIVE_DIVIDENDS>` is `true`).  
-- `buyer_accrued_jackpot`: past jackpots amount accrued to the seller.  
+- `seller_total_accrued_dividends`: the dividends accrued to the seller.  
+- `seller_accrued_jackpot`: past jackpots amount accrued to the seller.  
 
 # Airdrop
 ```
@@ -166,7 +165,8 @@ CALL_METHOD
 `<RECIPIENT_ADDRESS>`: account address of one of the recipients.  
 `<SHARE>`: share of jimmi coins to send to this recipient. The sum of all shares must be 1.  
 
-This method emits a `BuyEvent` event (see buy operation) for each recipient.  
+This method emits a `BuyEvent` event (see buy operation) for each recipient and a single `AirdropCompletedEvent` containing:  
+- `global_dividends_per_jimmi`: amount of dividends per Jimmi (this is the final value, the one in the `BuyEvents` is obsolete).  
 
 # Withdraw dividends
 ```
