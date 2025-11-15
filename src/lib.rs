@@ -126,6 +126,26 @@ struct AirdropCompletedEvent {
     AirdropCompletedEvent,
 )]
 mod club401k {
+    enable_method_auth! {
+        roles {
+            // All of these roles are allow_all; the owner can change them to make some of the
+            // methods inaccessible should an emergency occur
+            buyer => updatable_by: [OWNER];
+            seller => updatable_by: [OWNER];
+            staker => updatable_by: [OWNER];
+            airdropper => updatable_by: [OWNER];
+        },
+        methods {
+            buy => restrict_to: [buyer];
+            post_buy => restrict_to: [buyer];
+            pre_sell => restrict_to: [seller];
+            sell => restrict_to: [seller];
+            withdraw_dividends => restrict_to: [staker];
+            airdrop => restrict_to: [airdropper];
+            update_settings => restrict_to: [OWNER];
+        }
+    }
+
     struct Club401k {
         // Maximum 401k supply
         max_supply: Decimal,
@@ -182,6 +202,8 @@ mod club401k {
          * will manage
          */
         pub fn new(
+            // Componet and coin owner badge address
+            owner_badge_address: ResourceAddress,
             // Percentage of XRD to pay as dividends when buying and selling 401k (0-1 range)
             dividends_percentage: Decimal,
             // Percentage of XRD to pay to the jackpot when buying and selling 401k (0-1 range)
@@ -241,6 +263,10 @@ mod club401k {
             assert!(
                 jackpot_threshold > Decimal::ZERO && jackpot_threshold < Decimal::ONE,
                 "Wrong jackpot_threshold"
+            );
+            assert!(
+                jackpot_threshold_time >= 0,
+                "Wrong jackpot_threshold_time"
             );
 
             // Reserve a componet address; it will be used to set roles in the created resources
@@ -312,34 +338,34 @@ mod club401k {
             let withdraw_badge_address = withdraw_badge_manager.address();
 
             // Create the 401k coin resource
-            let coin_manager = ResourceBuilder::new_fungible(OwnerRole::None)
+            let coin_manager = ResourceBuilder::new_fungible(OwnerRole::Updatable(rule!(require(owner_badge_address))))
             .metadata(metadata!(
                 roles {
-                    metadata_setter => rule!(deny_all);
-                    metadata_setter_updater => rule!(deny_all);
-                    metadata_locker => rule!(deny_all);
-                    metadata_locker_updater => rule!(deny_all);
+                    metadata_setter => rule!(require(owner_badge_address));
+                    metadata_setter_updater => rule!(require(owner_badge_address));
+                    metadata_locker => rule!(require(owner_badge_address));
+                    metadata_locker_updater => rule!(require(owner_badge_address));
                 },
                 init {
-                    "symbol" => "401K", locked;
-                    "name" => "401k", locked;
+                    "symbol" => "401K", updatable;
+                    "name" => "401k", updatable;
                 }
             ))
             .mint_roles(mint_roles!(
                 minter => rule!(require(global_caller(component_address)));
-                minter_updater => rule!(deny_all);
+                minter_updater => rule!(require(owner_badge_address));
             ))
             .burn_roles(burn_roles!(
                 burner => rule!(require(global_caller(component_address)));
-                burner_updater => rule!(deny_all);
+                burner_updater => rule!(require(owner_badge_address));
             ))
             .withdraw_roles(withdraw_roles!(
                 withdrawer => rule!(require(withdraw_badge_address));
-                withdrawer_updater => rule!(deny_all);
+                withdrawer_updater => rule!(require(owner_badge_address));
             ))
             .deposit_roles(deposit_roles!(
                 depositor => rule!(require(deposit_badge_address));
-                depositor_updater => rule!(deny_all);
+                depositor_updater => rule!(require(owner_badge_address));
             ))
             .create_with_no_initial_supply();
 
@@ -370,8 +396,14 @@ mod club401k {
                 jackpots: KeyValueStore::new_with_registered_type(),
             }
             .instantiate()
-            .prepare_to_globalize(OwnerRole::None)
+            .prepare_to_globalize(OwnerRole::Updatable(rule!(require(owner_badge_address))))
             .with_address(address_reservation)
+            .roles(roles!(
+                buyer => rule!(allow_all);
+                seller => rule!(allow_all);
+                staker => rule!(allow_all);
+                airdropper => rule!(allow_all);
+            ))
             .globalize();
 
             (
@@ -1049,6 +1081,48 @@ mod club401k {
                     global_dividends_per_401k: self.dividends_per_401k,
                 }
             );
+        }
+
+        /* The owner can invoke this method to make changes to one of more component settings
+         */
+        pub fn update_settings(
+            &mut self,
+            // Percentage of XRD to pay as dividends when buying and selling 401k (0-1 range)
+            dividends_percentage: Decimal,
+            // Percentage of XRD to pay to the jackpot when buying and selling 401k (0-1 range)
+            jackpot_percentage: Decimal,
+            // A jackpot distribution can happen when the price is below this percentage of the ATH
+            jackpot_threshold: Decimal,
+            // How long must the price stay below the threshold for the jackpot to be distributed
+            jackpot_threshold_time: i64,
+        ) {
+            // Check that input parameters make sense
+            assert!(
+                dividends_percentage >= Decimal::ZERO,
+                "Wrong dividends_percentage"
+            );
+            assert!(
+                jackpot_percentage >= Decimal::ZERO,
+                "Wrong jackpot_percentage"
+            );
+            assert!(
+                dividends_percentage + jackpot_percentage < Decimal::ONE,
+                "dividends_percentage + jackpot_percentage >= 100%"
+            );
+            assert!(
+                jackpot_threshold > Decimal::ZERO && jackpot_threshold < Decimal::ONE,
+                "Wrong jackpot_threshold"
+            );
+            assert!(
+                jackpot_threshold_time >= 0,
+                "Wrong jackpot_threshold_time"
+            );
+
+            // Update settings
+            self.dividends_percentage = dividends_percentage;
+            self.jackpot_percentage = jackpot_percentage;
+            self.jackpot_threshold = jackpot_threshold;
+            self.jackpot_threshold_time = jackpot_threshold_time;
         }
     }
 }
