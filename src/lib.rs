@@ -10,6 +10,8 @@ struct DepositBadge {
     bought_amount: Decimal,
     // Price the Jimmi were bought at
     price: Decimal,
+    // Dividends amount per Jimmi coin
+    global_dividends_per_jimmi: Decimal,
 }
 
 /* NonFungibleData of the badge needed to withdraw Jimmi from a Vault.
@@ -542,6 +544,14 @@ mod jimmi {
                 "No XRD provided"
             );
 
+            let supply = self.jimmi_manager.total_supply().unwrap();
+
+            // Compute the current global dividends amount per Jimmi coin
+            let global_dividends_per_jimmi = match supply == Decimal::ZERO {
+                true => Decimal::ZERO,
+                false =>  self.unassigned_dividends / supply,
+            };
+
             // Take the XRD share to use as dividends
             let dividends_amount = xrd_amount * self.dividends_percentage;
             self.dividends.put(
@@ -589,6 +599,7 @@ mod jimmi {
                 DepositBadge {
                     bought_amount: bought_amount,
                     price: price,
+                    global_dividends_per_jimmi: global_dividends_per_jimmi,
                 }
             );
 
@@ -630,22 +641,27 @@ mod jimmi {
                 // If not create a new one
                 None => Buyer {
                     current_bought_amount: Decimal::ZERO,
-                    dividends_per_jimmi: global_dividends_per_jimmi,
+                    dividends_per_jimmi: deposit_badge.global_dividends_per_jimmi,
                     accrued_dividends: Decimal::ZERO,
                     current_jackpot_number: self.current_jackpot_number,
                     accrued_jackpot: Decimal::ZERO,
                 },
-                Some(buyer) => buyer.clone(),
+                Some(b) => {
+                    let mut buyer = b.clone();
+
+                    // Update the dividends_per_jimmi for this buyer
+                    buyer.dividends_per_jimmi =
+                        (buyer.current_bought_amount * buyer.dividends_per_jimmi +
+                        deposit_badge.bought_amount * deposit_badge.global_dividends_per_jimmi) /
+                        (buyer.current_bought_amount + deposit_badge.bought_amount);
+
+                    buyer
+                },
             };
 
             // Accrew eventual past jackpots to the buyer
             _ = self.check_won_jackpots(&mut buyer, false);
-
-            // Update the dividends_per_jimmi for this buyer
-            buyer.dividends_per_jimmi = (buyer.current_bought_amount * buyer.dividends_per_jimmi +
-                deposit_badge.bought_amount * global_dividends_per_jimmi) /
-                (buyer.current_bought_amount + deposit_badge.bought_amount);
-
+            
             // Update the bought amount for this buyer
             buyer.current_bought_amount += deposit_badge.bought_amount;
 
@@ -842,10 +858,8 @@ mod jimmi {
             // Get information about this account
             let mut buyer = self.buyers.get(&account).expect("Account not found").clone();
 
-            // Take the pending dividedns and register that there are no more pending dividends for
-            // this account
+            // Take the pending dividedns
             let dividends_bucket = self.dividends.take(buyer.accrued_dividends);
-            buyer.accrued_dividends = Decimal::ZERO;
 
             // Get any new or previously accrued jackpot shares
             let jackpot_bucket = self.check_won_jackpots(&mut buyer, true);
@@ -861,6 +875,9 @@ mod jimmi {
                     }
                 }
             );
+
+            // No more pending dividends for this account
+            buyer.accrued_dividends = Decimal::ZERO;
 
             // Save updated accout information
             self.buyers.insert(
@@ -887,6 +904,10 @@ mod jimmi {
                 xrd_amount > Decimal::ZERO,
                 "No XRD provided"
             );
+
+            // Compute the current global dividends amount per Jimmi coin
+            let global_dividends_per_jimmi =
+                self.unassigned_dividends / self.jimmi_manager.total_supply().unwrap();
 
             // Take the XRD share to use as dividends
             let dividends_amount = xrd_amount * self.dividends_percentage;
@@ -935,32 +956,33 @@ mod jimmi {
                 DepositBadge {
                     bought_amount: bought_amount,
                     price: price,
+                    global_dividends_per_jimmi: global_dividends_per_jimmi,
                 }
             );
 
             // Compute the new global dividends amount per Jimmi coin
-            let global_dividends_per_jimmi =
+            let new_global_dividends_per_jimmi =
                 self.unassigned_dividends / self.jimmi_manager.total_supply().unwrap();
 
             for (account, share) in recipients.iter() {
+                // Compute the amount of Jimmi for this recipient
+                let amount = bought_amount * *share;
+                if amount == Decimal::ZERO {
+                    continue;
+                }
+
                 // Is the recipient already registered?
                 let mut buyer = match self.buyers.get(&account) {
                     // If not create a new one
                     None => Buyer {
                         current_bought_amount: Decimal::ZERO,
-                        dividends_per_jimmi: global_dividends_per_jimmi,
+                        dividends_per_jimmi: Decimal::ZERO,
                         accrued_dividends: Decimal::ZERO,
                         current_jackpot_number: self.current_jackpot_number,
                         accrued_jackpot: Decimal::ZERO,
                     },
                     Some(buyer) => buyer.clone(),
                 };
-
-                // Compute the amount of Jimmi for this recipient
-                let amount = bought_amount * *share;
-                if amount == Decimal::ZERO {
-                    continue;
-                }
 
                 // Accrew eventual past jackpots to the buyer
                 _ = self.check_won_jackpots(&mut buyer, false);
@@ -997,7 +1019,7 @@ mod jimmi {
                             bought_amount: amount,
                             total_dividends_amount: self.unassigned_dividends,
                             current_jackpot_amount: self.current_jackpot_amount,
-                            global_dividends_per_jimmi: global_dividends_per_jimmi,
+                            global_dividends_per_jimmi: new_global_dividends_per_jimmi,
                             buyer_dividends_per_jimmi: buyer.dividends_per_jimmi,
                             ath: self.ath,
                             buyer_accrued_jackpot: buyer.accrued_jackpot,
